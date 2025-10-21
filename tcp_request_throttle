@@ -1,0 +1,45 @@
+when RULE_INIT {
+    # Configurable parameters
+    set static::window_seconds 10
+    set static::threshold_ratio 1.1
+    set static::queue_delay_ms 250
+}
+
+when CLIENT_ACCEPTED {
+    set pool_name [LB::server pool]
+    if { $pool_name eq "" } {
+        set pool_name "default"
+    }
+
+    # Timestamp key per second
+    set now [clock seconds]
+    set key "conn_count:${pool_name}:${now}"
+
+    # Increment connection counter
+    set count [table incr $key 1]
+    table timeout $key [expr { $static::window_seconds + 2 }]
+
+    # Compute 10-second moving average
+    set total 0
+    set samples 0
+    for {set i 0} {$i < $static::window_seconds} {incr i} {
+        set ts [expr {$now - $i}]
+        set val [table lookup "conn_count:${pool_name}:${ts}"]
+        if { $val ne "" } {
+            incr total $val
+            incr samples
+        }
+    }
+    if { $samples > 0 } {
+        set avg [expr { double($total) / $samples }]
+    } else {
+        set avg 0
+    }
+
+    # Detect >10 % increase
+    if { $avg > 0 && $count > ($avg * $static::threshold_ratio) } {
+        # Queue connection (delay) instead of dropping
+        after $static::queue_delay_ms
+        log local0. "Throttled TCP connection for pool $pool_name: current=$count avg=$avg"
+    }
+}
