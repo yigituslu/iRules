@@ -1,0 +1,60 @@
+# iRule: route-by-version
+# Purpose: Extract version from header, store in table, and route newer versions to a specific pool
+
+when RULE_INIT {
+    # ---- Configurable knobs ----
+    set static::header_name   "X-App-Version"  ;# header carrying client/app version
+    set static::min_version   "2.5.0"          ;# baseline version that qualifies as "newer"
+    set static::new_pool      "app_pool_v2"    ;# pool for newer/equal versions
+    set static::default_pool  "app_pool_v1"    ;# pool for older/unknown versions
+    set static::tbl_name      "ver_by_ip"      ;# subtable name
+    set static::tbl_ttl       86400            ;# seconds
+
+    # Version compare proc: returns 1 if a>b, -1 if a<b, 0 if equal (numeric dot parts)
+    proc static::vercmp {a b} {
+        set aa [split $a .]
+        set bb [split $b .]
+        set la [llength $aa]
+        set lb [llength $bb]
+        set max $la
+        if {$lb > $max} { set max $lb }
+        for {set i 0} {$i < $max} {incr i} {
+            set va 0
+            set vb 0
+            if {$i < $la} {
+                # defensively coerce to int; non-numeric becomes 0
+                catch { set va [expr {int([lindex $aa $i])}] }
+            }
+            if {$i < $lb} {
+                catch { set vb [expr {int([lindex $bb $i])}] }
+            }
+            if {$va > $vb} { return 1 }
+            if {$va < $vb} { return -1 }
+        }
+        return 0
+    }
+}
+
+when HTTP_REQUEST {
+    set client_ip [IP::client_addr]
+    set ver [HTTP::header value $static::header_name]
+
+    # Save or reuse version per client
+    if {$ver ne ""} {
+        table set -subtable $static::tbl_name $client_ip $ver $static::tbl_ttl
+    } else {
+        set ver [table lookup -subtable $static::tbl_name $client_ip]
+    }
+
+    # Route based on version
+    if {$ver ne ""} {
+        if {[static::vercmp $ver $static::min_version] >= 0} {
+            pool $static::new_pool
+        } else {
+            pool $static::default_pool
+        }
+    } else {
+        # No version at all -> safe default
+        pool $static::default_pool
+    }
+}
